@@ -1,0 +1,482 @@
+local Workspace = game.Workspace or game:GetService("Workspace")
+local Players = game.Players or game:GetService("Players")
+
+local function refreshW()
+    Workspace = game.Workspace or game:GetService("Workspace")
+    return Workspace
+end
+
+if type(_G.npcEspLoop) == "number" and tick() - _G.npcEspLoop < 10 then
+    if type(_G.npcEspState) == "table" then
+        _G.npcEspState.running = false
+    end
+    if type(_G.npcEspHandles) == "table" then
+        for _, rec in pairs(_G.npcEspHandles) do
+            if type(rec) == "table" and rec.handle then
+                pcall(rec.handle.Remove, rec.handle)
+            end
+        end
+        _G.npcEspHandles = {}
+    end
+    _G.npcEspLoop = nil
+    if notify then
+        notify("NPC ESP", "Disabled - rerun to enable", 3)
+    end
+    print("NPC ESP disabled")
+    return
+end
+if type(_G.npcEspHandles) == "table" then
+    for _, rec in pairs(_G.npcEspHandles) do
+        if type(rec) == "table" and rec.handle then
+            pcall(rec.handle.Remove, rec.handle)
+        end
+    end
+end
+_G.npcEspHandles = {}
+
+if notify then
+    notify("NPC ESP", "Loaded", 3)
+end
+print("NPC ESP loaded")
+
+local registered = {}   -- addr -> {model=, handle=}
+local containers = {}   -- container full paths that have held rigs
+local shapeMemo = {}    -- addr -> true (confirmed rig)
+local lastCount = -1
+local state = { running = true }
+_G.npcEspState = state
+_G.npcEspHandles = registered
+
+
+local KEYWORDS = {
+    "npc", "enemy", "enemies", "hostile", "bad", "foe", "opponent",
+    "bot", "bots", "mob", "mobs", "monster", "monsters", "zombie", "zombies",
+    "creature", "animals", "beast", "villain", "boss", "bosses", "miniboss",
+    "guard", "soldier", "warrior", "fighter", "target", "targets",
+    "dummy", "dummies", "practice", "training", "skeleton", "orc", "goblin",
+    "troll", "ogre", "demon", "ghost", "spirit", "vampire", "dragon",
+    "gang", "thug", "bandit", "raider", "pirate", "agent", "assassin",
+    "merc", "hunter", "robot", "drone", "android", "minion", "spawn",
+    "enemy spawn", "npc spawn", "characters", "spawns", "ignore",
+    "goblin", "orc", "skeleton", "viking", "demon", "alligator", "octopus",
+    "shark", "uruk", "rotjaw", "kraken", "golem", "jester", "miniboss",
+    "elite", "rotten", "devil", "darklord", "doombringer",
+}
+
+
+local LEAF_CLASSES = {
+    Part = true, MeshPart = true, UnionOperation = true, Sound = true,
+    Decal = true, Texture = true, SpecialMesh = true, BodyColors = true,
+    Humanoid = true, Tool = true,
+}
+
+
+local function fullName(inst)
+    local ok, f = pcall(function() return inst:GetFullName() end)
+    if ok and type(f) == "string" then return f end
+    return ""
+end
+
+
+local function playerPaths()
+    local set = {}
+    local svc = game.Players or Players
+    if not svc then return set end
+    local ok, kids = pcall(function() return svc:GetChildren() end)
+    if not ok or type(kids) ~= "table" then return set end
+    for _, p in ipairs(kids) do
+        if p.ClassName == "Player" then
+            local c = p.Character
+            if c then set[fullName(c)] = true end
+        end
+    end
+    return set
+end
+
+
+local function rigShape(model)
+    if model.ClassName ~= "Model" or model.Parent == nil then return false end
+    if not model:FindFirstChildOfClass("Humanoid") then return false end
+    if not model:FindFirstChild("Head") and not model:FindFirstChild("Torso") then return false end
+    return true
+end
+
+
+local function aliveRig(model)
+    if model.Parent == nil then return false end
+    local x = model:FindFirstChildOfClass("Humanoid")
+    if not x then return false end
+    local ok, h = pcall(function() return x.Health end)
+    return ok and h ~= nil and h >= 0
+end
+
+
+local function drawable(model)
+    if model.Parent == nil then return false end
+    local x = model:FindFirstChildOfClass("Humanoid")
+    if not x then return false end
+    local ok, hp = pcall(function() return x.Health end)
+    if not ok or hp == nil then return false end
+    if hp > 0 then return true end
+    local r = model:FindFirstChild("HumanoidRootPart") or model:FindFirstChild("Torso")
+    if r then
+        local okv, v = pcall(function() return r.AssemblyLinearVelocity end)
+        if okv and v and v.Magnitude > 1 then return true end
+    end
+    return false
+end
+
+
+local function nameHits(name)
+    local n = name:lower()
+    for i = 1, #KEYWORDS do
+        if string.find(n, KEYWORDS[i], 1, true) then return true end
+    end
+    return false
+end
+
+
+local function restPath(path)
+    local i = string.find(path, "Workspace")
+    if not i then return nil end
+    return string.sub(path, i)
+end
+
+
+local function resolve(rest)
+    local cur = Workspace
+    for part in string.gmatch(rest, "[^%.]+") do
+        if part ~= "Workspace" then
+            local nxt = cur:FindFirstChild(part)
+            if not nxt then return nil end
+            cur = nxt
+        end
+    end
+    return cur
+end
+
+
+local EXCLUDE = {
+    OldLobbyZombie = true,
+}
+
+local EXCLUDE_PATHS = {
+    "Workspace.Jumpscare",
+}
+
+local DUMMY_HINT = { TrainingPole = true, Pole = true, Dummy = true }
+
+local function isEnemyRig(model)
+    if _G.npcShowAll then return true end
+    local name = model.Name or ""
+    if not _G.npcShowCity and string.find(name, "(NPC)", 1, true) then return false end
+    if not _G.npcShowDummies then
+        for hint in pairs(DUMMY_HINT) do
+            if string.find(name, hint, 1, true) then return false end
+        end
+        local x = model:FindFirstChildOfClass("Humanoid")
+        if x then
+            local ok, mhp = pcall(function() return x.MaxHealth end)
+            if ok and mhp and mhp > 1000000 then return false end
+        end
+    end
+    return true
+end
+
+
+local function addRig(model, pp, out, seenAddr)
+    local addr = model.Address
+    if not addr or seenAddr[addr] then return end
+    if EXCLUDE[model.Name] then return end
+    local okf, full = pcall(function() return model:GetFullName() end)
+    if okf and type(full) == "string" then
+        for i = 1, #EXCLUDE_PATHS do
+            if string.find(full, EXCLUDE_PATHS[i], 1, true) then return end
+        end
+    end
+    if not isEnemyRig(model) then return end
+    if shapeMemo[addr] == nil then
+        local ok2, isR = pcall(rigShape, model)
+        if ok2 and isR then shapeMemo[addr] = true end
+    end
+    if shapeMemo[addr] and not pp[fullName(model)] then
+        seenAddr[addr] = true
+        out[#out + 1] = model
+    end
+end
+
+
+local FAST_BUDGET = 5000
+
+
+local function walkScan(inst, depth, pp, out, seenAddr, budget)
+    if depth > 6 or budget.n <= 0 then return end
+    for _, c in ipairs(inst:GetChildren()) do
+        budget.n = budget.n - 1
+        if budget.n <= 0 then return end
+        addRig(c, pp, out, seenAddr)
+        if not LEAF_CLASSES[c.ClassName] then
+            if c.ClassName == "Model" then
+                local hum = c:FindFirstChildOfClass("Humanoid")
+                if hum and (c:FindFirstChild("Head") or c:FindFirstChild("Torso")) then
+                    local p = c.Parent
+                    if p and p ~= inst then containers[fullName(p)] = true end
+                end
+            end
+            walkScan(c, depth + 1, pp, out, seenAddr, budget)
+        end
+    end
+end
+
+
+local function scanFast(pp)
+    local out, seenAddr = {}, {}
+    local top = Workspace:GetChildren()
+    for _, child in ipairs(top) do
+        addRig(child, pp, out, seenAddr)
+        if not LEAF_CLASSES[child.ClassName] then
+            local kids = child:GetChildren()
+            for _, gg in ipairs(kids) do
+                addRig(gg, pp, out, seenAddr)
+            end
+        end
+    end
+    local ig = Workspace:FindFirstChild("Ignore")
+    if ig then
+        containers[fullName(ig)] = true
+        for _, kid in ipairs(ig:GetChildren()) do
+            containers[fullName(kid)] = true
+        end
+        local ib = { n = FAST_BUDGET }
+        walkScan(ig, 1, pp, out, seenAddr, ib)
+    end
+    local cbTotal = { n = 45000 }
+    for path in pairs(containers) do
+        local c = resolve(path)
+        if c and c.Parent ~= nil then
+            local cb = { n = math.min(3000, cbTotal.n) }
+            walkScan(c, 1, pp, out, seenAddr, cb)
+            cbTotal.n = cbTotal.n - (3000 - cb.n)
+        end
+    end
+    local wb = { n = FAST_BUDGET }
+    for _, g in ipairs(top) do
+        if not LEAF_CLASSES[g.ClassName] then
+            walkScan(g, 2, pp, out, seenAddr, wb)
+        end
+    end
+    return out
+end
+
+
+local function seedByKeywords(pre)
+    local function walk(inst, depth)
+        if inst == nil then return end
+        if depth > pre then return end
+        for _, c in ipairs(inst:GetChildren()) do
+            if nameHits(c.Name) then
+                containers[fullName(c)] = true
+            end
+            if not LEAF_CLASSES[c.ClassName] then
+                walk(c, depth + 1)
+            end
+        end
+    end
+    walk(Workspace, 1)
+end
+
+
+local seedState = {}
+
+local function seedStep(budget)
+    if not seedState.stack then
+        local ws = refreshW()
+        if not ws then return end
+        seedState.stack = { { inst = ws, depth = 1, kids = nil, idx = 0 } }
+    end
+    local spent = 0
+    local stack = seedState.stack
+    while #stack > 0 and spent < budget do
+        local frame = stack[#stack]
+        local kids = frame.kids
+        if not kids then
+            kids = frame.inst:GetChildren()
+            frame.kids = kids
+        end
+        frame.idx = frame.idx + 1
+        local c = kids[frame.idx]
+        if not c then
+            stack[#stack] = nil
+        else
+            spent = spent + 1
+            if c.ClassName == "Model" then
+                local hum = c:FindFirstChildOfClass("Humanoid")
+                if hum then
+                    local head = c:FindFirstChild("Head") or c:FindFirstChild("Torso")
+                    if head then
+                        local p = c.Parent
+                        if p then containers[fullName(p)] = true end
+                    end
+                end
+            end
+            if not LEAF_CLASSES[c.ClassName] and frame.depth < 10 then
+                stack[#stack + 1] = { inst = c, depth = frame.depth + 1, kids = nil, idx = 0 }
+            end
+        end
+    end
+    if #stack == 0 then seedState.stack = nil end
+end
+
+
+local function newCache()
+    return { head = nil, root = nil, hp = 0, mhp = 100, draw = false, name = "NPC" }
+end
+
+
+local function refreshCache(c, m)
+    c.name = m.Name
+    c.head = m:FindFirstChild("Head") or m:FindFirstChild("Torso")
+    c.root = m:FindFirstChild("HumanoidRootPart") or m:FindFirstChild("Torso") or c.head
+    local x = m:FindFirstChildOfClass("Humanoid")
+    if x then
+        local ok, hp = pcall(function() return x.Health end)
+        if ok and hp then c.hp = hp end
+        local ok2, mhp = pcall(function() return x.MaxHealth end)
+        if ok2 and mhp then c.mhp = mhp end
+    end
+    c.draw = drawable(m)
+end
+
+
+local function makeCallbacks(m, c)
+    return {
+        entry = m,
+        ShouldDraw = function() return c.draw end,
+        GetRoot = function() return c.root end,
+        GetHead = function() return c.head end,
+        GetHealth = function()
+            local v = c.hp
+            if v < 0 then v = 0 end
+            return v
+        end,
+        GetMaxHealth = function()
+            local v = c.mhp
+            if not (v > 0) or v > 1000000 then v = 100 end
+            return v
+        end,
+        GetDisplayName = function() return c.name end,
+    }
+end
+
+
+local function heartbeat()
+    _G.npcEspLoop = tick()
+end
+
+
+local function cleanupHandles()
+    for _, rec in pairs(registered) do
+        pcall(rec.handle.Remove, rec.handle)
+    end
+    registered = {}
+    _G.npcEspHandles = registered
+end
+
+
+local epoch = 0
+
+local function mainLoop()
+    epoch = epoch + 1
+    local me = epoch
+    local tickN = 0
+    while state.running do
+        if me ~= epoch then return end
+        heartbeat()
+        local ok, err = pcall(function()
+            if not refreshW() then return end
+            tickN = tickN + 1
+            seedStep(3000)
+            if tickN % 1200 == 0 then
+                shapeMemo = {}
+                containers = {}
+                seedByKeywords(3)
+            end
+            local pp = playerPaths()
+            local list = scanFast(pp)
+            if _G.npcDebug then
+                local cCount = 0
+                for _ in pairs(containers) do cCount = cCount + 1 end
+                local ig = Workspace:FindFirstChild("Ignore")
+                local zn = ig and ig:FindFirstChild("Zombies")
+                print("DBG topkids=" .. #(Workspace:GetChildren()) .. " cont=" .. cCount .. " list=" .. #list .. " ig=" .. tostring(ig ~= nil) .. " zn=" .. tostring(zn and #zn:GetChildren() or -1))
+                for _, m in ipairs(list) do
+                    local addr = m.Address
+                    local hum = m:FindFirstChild("Humanoid")
+                    local okH, h = pcall(function() return hum.Health end)
+                    print("DBG rig " .. m.Name .. " hp=" .. tostring(h) .. " alive=" .. tostring(okH and h ~= nil and h > 0) .. " addr=" .. tostring(addr) .. " reg=" .. tostring(addr and registered[addr] ~= nil))
+                end
+            end
+            local alive = {}
+            for _, m in ipairs(list) do
+                local addr = m.Address
+                if addr and aliveRig(m) then
+                    alive[addr] = true
+                    local rec = registered[addr]
+                    if rec then
+                        rec.misses = 0
+                        refreshCache(rec.cache, m)
+                    else
+                        local c = newCache()
+                        refreshCache(c, m)
+                        local ok2, h = pcall(RegisterModel, makeCallbacks(m, c))
+                        if ok2 and h then registered[addr] = { model = m, handle = h, misses = 0, cache = c } end
+                    end
+                end
+            end
+            for addr, rec in pairs(registered) do
+                if not alive[addr] or not drawable(rec.model) then
+                    rec.misses = (rec.misses or 0) + 1
+                    if rec.misses > 3 then
+                        pcall(rec.handle.Remove, rec.handle)
+                        registered[addr] = nil
+                    end
+                else
+                    rec.misses = 0
+                end
+            end
+            local n = 0
+            for _ in pairs(registered) do n = n + 1 end
+            if n ~= lastCount then
+                lastCount = n
+                print("NPC ESP: " .. n .. " registered")
+            end
+        end)
+        if not ok then print("esp tick error: " .. tostring(err)) end
+        heartbeat()
+        task.wait(1)
+    end
+    if me == epoch then
+        cleanupHandles()
+    end
+    _G.npcEspLoop = nil
+    print("NPC ESP stopped")
+end
+
+
+task.spawn(mainLoop)
+
+
+local function watchdog()
+    while state.running do
+        task.wait(5)
+        local last = _G.npcEspLoop
+        if type(last) ~= "number" or tick() - last > 12 then
+            print("NPC ESP health check: loop stale - restarting")
+            task.spawn(mainLoop)
+            task.wait(15)
+        end
+    end
+end
+
+task.spawn(watchdog)
+task.spawn(watchdog)
