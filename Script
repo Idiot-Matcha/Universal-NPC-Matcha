@@ -63,6 +63,11 @@ local PROFILES = {
         partRigs = true,
         bodyChild = true,
     },
+    [107085682317132] = {
+        folder = "_NPCS_",
+        paths = { "game.Workspace._NPCS_" },
+        partRigs = true,
+    },
 }
 
 local function gameProfile()
