@@ -49,6 +49,11 @@ local PROFILES = {
         folder = "NPCs",
         bodiesFolder = "ClientNPCs",
     },
+    [82797688803922] = {
+        folder = "NPCs",
+        path = "game.Workspace.GameObjects.NPCs",
+        partRigs = true,
+    },
 }
 
 local function gameProfile()
@@ -111,12 +116,23 @@ end
 
 
 local function rigShape(model)
-    if model.ClassName ~= "Model" or model.Parent == nil then return false end
+    if model.Parent == nil then return false end
     local prof = gameProfile()
+    if prof and prof.partRigs and (model.ClassName == "Part" or model.ClassName == "MeshPart") then return true end
+    if model.ClassName ~= "Model" then return false end
     if prof then
-        if not model:FindFirstChild("HumanoidRootPart") then return false end
-        if model:FindFirstChild("CollisionHull") then return true end
-        if model:FindFirstChildOfClass("Humanoid") and (model:FindFirstChild("Head") or model:FindFirstChild("Torso")) then return true end
+        if model:FindFirstChild("HumanoidRootPart") then
+            if model:FindFirstChild("CollisionHull") then return true end
+            if model:FindFirstChildOfClass("Humanoid") and (model:FindFirstChild("Head") or model:FindFirstChild("Torso")) then return true end
+            if prof.partRigs then return true end
+            return false
+        end
+        if prof.partRigs then
+            if model:FindFirstChild("RootPart") then return true end
+            if model.ClassName == "Part" or model.ClassName == "MeshPart" then return true end
+            local rc = model:FindFirstChildOfClass("Part") or model:FindFirstChildOfClass("MeshPart")
+            if rc then return true end
+        end
         return false
     end
     if not model:FindFirstChildOfClass("Humanoid") then return false end
@@ -129,6 +145,12 @@ local function aliveRig(model)
     if model.Parent == nil then return false end
     local x = model:FindFirstChildOfClass("Humanoid")
     if not x then
+        local prof = gameProfile()
+        if prof and prof.partRigs then
+            if model.ClassName == "Part" or model.ClassName == "MeshPart" then return true end
+            if model:FindFirstChild("HumanoidRootPart") or model:FindFirstChild("RootPart")
+                or model:FindFirstChildOfClass("Part") or model:FindFirstChildOfClass("MeshPart") then return true end
+        end
         if model:FindFirstChild("HumanoidRootPart") and model:FindFirstChild("CollisionHull") then return true end
         return false
     end
@@ -141,6 +163,12 @@ local function drawable(model)
     if model.Parent == nil then return false end
     local x = model:FindFirstChildOfClass("Humanoid")
     if not x then
+        local prof = gameProfile()
+        if prof and prof.partRigs then
+            if model.ClassName == "Part" or model.ClassName == "MeshPart" then return true end
+            if model:FindFirstChild("HumanoidRootPart") or model:FindFirstChild("RootPart")
+                or model:FindFirstChildOfClass("Part") or model:FindFirstChildOfClass("MeshPart") then return true end
+        end
         if model:FindFirstChild("HumanoidRootPart") and model:FindFirstChild("CollisionHull") then return true end
         return false
     end
@@ -175,7 +203,7 @@ end
 local function resolve(rest)
     local cur = Workspace
     for part in string.gmatch(rest, "[^%.]+") do
-        if part ~= "Workspace" then
+        if part ~= "Workspace" and part ~= "game" then
             local nxt = cur:FindFirstChild(part)
             if not nxt then return nil end
             cur = nxt
@@ -200,14 +228,11 @@ local function isEnemyRig(model)
     local name = model.Name or ""
     if not _G.npcShowCity and string.find(name, "(NPC)", 1, true) then return false end
     if not _G.npcShowDummies then
+        local isDummy = false
         for hint in pairs(DUMMY_HINT) do
-            if string.find(name, hint, 1, true) then return false end
+            if string.find(name, hint, 1, true) then isDummy = true break end
         end
-        local x = model:FindFirstChildOfClass("Humanoid")
-        if x then
-            local ok, mhp = pcall(function() return x.MaxHealth end)
-            if ok and mhp and mhp > 1000000 then return false end
-        end
+        if isDummy then return false end
     end
     return true
 end
@@ -220,7 +245,15 @@ local function addRig(model, pp, out, seenAddr)
     local prof = gameProfile()
     if prof then
         local p = model.Parent
-        local inF = p and (p.Name == prof.folder or p.Name == prof.bodiesFolder) and p.Parent == Workspace
+        local inF = false
+        if p then
+            if prof.path then
+                local okP, pf = pcall(function() return p:GetFullName() end)
+                inF = okP and pf == prof.path
+            else
+                inF = (p.Name == prof.folder or p.Name == prof.bodiesFolder) and p.Parent == Workspace
+            end
+        end
         local okA, cb = pcall(function() return model:GetAttribute("ClientBody") end)
         if not inF and not (okA and cb == true) then return end
     end
@@ -379,10 +412,10 @@ local function refreshCache(c, m)
         local ok2, mhp = pcall(function() return x.MaxHealth end)
         if ok2 and mhp then c.mhp = mhp end
     else
-        c.head = m:FindFirstChild("HumanoidRootPart")
+        c.head = m:FindFirstChild("HumanoidRootPart") or m:FindFirstChild("RootPart") or m:FindFirstChild("Head") or m
         c.hp, c.mhp = 100, 100
     end
-    c.root = m:FindFirstChild("HumanoidRootPart") or m:FindFirstChild("Torso") or c.head
+    c.root = m:FindFirstChild("HumanoidRootPart") or m:FindFirstChild("Torso") or m:FindFirstChild("RootPart") or c.head
     local hull = m:FindFirstChild("CollisionHull")
     if hull then
         local okS, st = pcall(function() return hull:GetAttribute("State") end)
@@ -412,6 +445,14 @@ local function makeCallbacks(m, c)
         end,
         GetDisplayName = function() return c.name end,
     }
+end
+
+
+local function seedProfileContainers()
+    local prof = gameProfile()
+    if prof and prof.path then
+        containers[prof.path] = true
+    end
 end
 
 
@@ -446,6 +487,7 @@ local function mainLoop()
                 shapeMemo = {}
                 containers = {}
                 seedByKeywords(3)
+                seedProfileContainers()
             end
             local pp = playerPaths()
             local list = scanFast(pp)
@@ -518,7 +560,9 @@ local function watchdog()
         local last = _G.npcEspLoop
         if type(last) ~= "number" or tick() - last > 12 then
             print("NPC ESP health check: loop stale - restarting")
-            task.spawn(mainLoop)
+seedProfileContainers()
+
+task.spawn(mainLoop)
             task.wait(15)
         end
     end
