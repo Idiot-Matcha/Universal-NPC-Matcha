@@ -39,6 +39,22 @@ if notify then
 end
 print("NPC ESP loaded")
 
+local PLACE = game.PlaceId or 0
+if type(PLACE) ~= "number" then PLACE = 0 end
+PLACE = math.floor(PLACE)
+
+-- per-game profiles. no profile = generic rig scan (Humanoid + Head/Torso anywhere)
+local PROFILES = {
+    [96430285140968] = {
+        folder = "NPCs",
+        bodiesFolder = "ClientNPCs",
+    },
+}
+
+local function gameProfile()
+    return PROFILES[PLACE]
+end
+
 local registered = {}   -- addr -> {model=, handle=}
 local containers = {}   -- container full paths that have held rigs
 local shapeMemo = {}    -- addr -> true (confirmed rig)
@@ -96,6 +112,13 @@ end
 
 local function rigShape(model)
     if model.ClassName ~= "Model" or model.Parent == nil then return false end
+    local prof = gameProfile()
+    if prof then
+        if not model:FindFirstChild("HumanoidRootPart") then return false end
+        if model:FindFirstChild("CollisionHull") then return true end
+        if model:FindFirstChildOfClass("Humanoid") and (model:FindFirstChild("Head") or model:FindFirstChild("Torso")) then return true end
+        return false
+    end
     if not model:FindFirstChildOfClass("Humanoid") then return false end
     if not model:FindFirstChild("Head") and not model:FindFirstChild("Torso") then return false end
     return true
@@ -105,7 +128,10 @@ end
 local function aliveRig(model)
     if model.Parent == nil then return false end
     local x = model:FindFirstChildOfClass("Humanoid")
-    if not x then return false end
+    if not x then
+        if model:FindFirstChild("HumanoidRootPart") and model:FindFirstChild("CollisionHull") then return true end
+        return false
+    end
     local ok, h = pcall(function() return x.Health end)
     return ok and h ~= nil and h >= 0
 end
@@ -114,7 +140,10 @@ end
 local function drawable(model)
     if model.Parent == nil then return false end
     local x = model:FindFirstChildOfClass("Humanoid")
-    if not x then return false end
+    if not x then
+        if model:FindFirstChild("HumanoidRootPart") and model:FindFirstChild("CollisionHull") then return true end
+        return false
+    end
     local ok, hp = pcall(function() return x.Health end)
     if not ok or hp == nil then return false end
     if hp > 0 then return true end
@@ -188,6 +217,13 @@ local function addRig(model, pp, out, seenAddr)
     local addr = model.Address
     if not addr or seenAddr[addr] then return end
     if EXCLUDE[model.Name] then return end
+    local prof = gameProfile()
+    if prof then
+        local p = model.Parent
+        local inF = p and (p.Name == prof.folder or p.Name == prof.bodiesFolder) and p.Parent == Workspace
+        local okA, cb = pcall(function() return model:GetAttribute("ClientBody") end)
+        if not inF and not (okA and cb == true) then return end
+    end
     local okf, full = pcall(function() return model:GetFullName() end)
     if okf and type(full) == "string" then
         for i = 1, #EXCLUDE_PATHS do
@@ -335,14 +371,24 @@ end
 
 local function refreshCache(c, m)
     c.name = m.Name
-    c.head = m:FindFirstChild("Head") or m:FindFirstChild("Torso")
-    c.root = m:FindFirstChild("HumanoidRootPart") or m:FindFirstChild("Torso") or c.head
     local x = m:FindFirstChildOfClass("Humanoid")
     if x then
+        c.head = m:FindFirstChild("Head") or m:FindFirstChild("Torso")
         local ok, hp = pcall(function() return x.Health end)
         if ok and hp then c.hp = hp end
         local ok2, mhp = pcall(function() return x.MaxHealth end)
         if ok2 and mhp then c.mhp = mhp end
+    else
+        c.head = m:FindFirstChild("HumanoidRootPart")
+        c.hp, c.mhp = 100, 100
+    end
+    c.root = m:FindFirstChild("HumanoidRootPart") or m:FindFirstChild("Torso") or c.head
+    local hull = m:FindFirstChild("CollisionHull")
+    if hull then
+        local okS, st = pcall(function() return hull:GetAttribute("State") end)
+        if okS and st and st ~= "" and st ~= "Patrolling" then
+            c.name = c.name .. " [" .. st .. "]"
+        end
     end
     c.draw = drawable(m)
 end
