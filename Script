@@ -54,6 +54,15 @@ local PROFILES = {
         path = "game.Workspace.GameObjects.NPCs",
         partRigs = true,
     },
+    [2317712696] = {
+        folder = "NPCs",
+        paths = {
+            "game.Workspace.WORKSPACE_Entities.NPCs",
+            "game.Workspace.WORKSPACE_Entities.Animals",
+        },
+        partRigs = true,
+        bodyChild = true,
+    },
 }
 
 local function gameProfile()
@@ -119,6 +128,11 @@ local function rigShape(model)
     if model.Parent == nil then return false end
     local prof = gameProfile()
     if prof and prof.partRigs and (model.ClassName == "Part" or model.ClassName == "MeshPart") then return true end
+    if prof and prof.bodyChild then
+        for _, b in ipairs(model:GetChildren()) do
+            if b.ClassName == "Model" and b:FindFirstChildOfClass("Humanoid") then return true end
+        end
+    end
     if model.ClassName ~= "Model" then return false end
     if prof then
         if model:FindFirstChild("HumanoidRootPart") then
@@ -141,11 +155,31 @@ local function rigShape(model)
 end
 
 
+local function bodyHumanoid(model)
+    local prof = gameProfile()
+    if not (prof and prof.bodyChild) then return nil end
+    for _, b in ipairs(model:GetChildren()) do
+        if b.ClassName == "Model" then
+            local hx = b:FindFirstChildOfClass("Humanoid")
+            if hx then return b, hx end
+        end
+    end
+    return nil
+end
+
+
 local function aliveRig(model)
     if model.Parent == nil then return false end
     local x = model:FindFirstChildOfClass("Humanoid")
     if not x then
         local prof = gameProfile()
+        if prof and prof.bodyChild then
+            local b, hx = bodyHumanoid(model)
+            if b then
+                local ok, h = pcall(function() return hx.Health end)
+                return ok and h ~= nil and h >= 0
+            end
+        end
         if prof and prof.partRigs then
             if model.ClassName == "Part" or model.ClassName == "MeshPart" then return true end
             if model:FindFirstChild("HumanoidRootPart") or model:FindFirstChild("RootPart")
@@ -164,6 +198,20 @@ local function drawable(model)
     local x = model:FindFirstChildOfClass("Humanoid")
     if not x then
         local prof = gameProfile()
+        if prof and prof.bodyChild then
+            local b, hx = bodyHumanoid(model)
+            if b then
+                local ok, hp = pcall(function() return hx.Health end)
+                if not ok or hp == nil then return false end
+                if hp > 0 then return true end
+                local r = b:FindFirstChild("HumanoidRootPart") or b:FindFirstChild("UpperTorso") or b:FindFirstChild("Torso")
+                if r then
+                    local okv, v = pcall(function() return r.AssemblyLinearVelocity end)
+                    if okv and v and v.Magnitude > 1 then return true end
+                end
+                return false
+            end
+        end
         if prof and prof.partRigs then
             if model.ClassName == "Part" or model.ClassName == "MeshPart" then return true end
             if model:FindFirstChild("HumanoidRootPart") or model:FindFirstChild("RootPart")
@@ -247,9 +295,14 @@ local function addRig(model, pp, out, seenAddr)
         local p = model.Parent
         local inF = false
         if p then
-            if prof.path then
+            local paths = prof.paths or (prof.path and { prof.path })
+            if paths then
                 local okP, pf = pcall(function() return p:GetFullName() end)
-                inF = okP and pf == prof.path
+                if okP then
+                    for i = 1, #paths do
+                        if pf == paths[i] then inF = true break end
+                    end
+                end
             else
                 inF = (p.Name == prof.folder or p.Name == prof.bodiesFolder) and p.Parent == Workspace
             end
@@ -412,10 +465,36 @@ local function refreshCache(c, m)
         local ok2, mhp = pcall(function() return x.MaxHealth end)
         if ok2 and mhp then c.mhp = mhp end
     else
-        c.head = m:FindFirstChild("HumanoidRootPart") or m:FindFirstChild("RootPart") or m:FindFirstChild("Head") or m
-        c.hp, c.mhp = 100, 100
+        local prof = gameProfile()
+        if prof and prof.bodyChild then
+            local b, hx = bodyHumanoid(m)
+            if b then
+                local ok, hp = pcall(function() return hx.Health end)
+                if ok and hp then c.hp = hp end
+                local ok2, mhp = pcall(function() return hx.MaxHealth end)
+                if ok2 and mhp then c.mhp = mhp end
+                local head = b:FindFirstChild("Head")
+                if not head then
+                    for _, cc in ipairs(b:GetChildren()) do
+                        head = cc:FindFirstChild("Head")
+                        if head then break end
+                    end
+                end
+                c.head = head or b:FindFirstChild("HumanoidRootPart") or b:FindFirstChild("Torso") or m
+                c.root = b:FindFirstChild("HumanoidRootPart") or b:FindFirstChild("UpperTorso") or b:FindFirstChild("Torso") or c.head
+            end
+        end
+        if c.head == nil then
+            c.head = m:FindFirstChild("HumanoidRootPart") or m:FindFirstChild("RootPart") or m:FindFirstChild("Head") or m
+            c.hp, c.mhp = 100, 100
+        end
+        local hv = m:FindFirstChild("Health")
+        if hv and hv.ClassName == "NumberValue" then
+            local okh, h = pcall(function() return hv.Value end)
+            if okh and type(h) == "number" and h >= 0 then c.hp = h end
+        end
     end
-    c.root = m:FindFirstChild("HumanoidRootPart") or m:FindFirstChild("Torso") or m:FindFirstChild("RootPart") or c.head
+    c.root = c.root or m:FindFirstChild("HumanoidRootPart") or m:FindFirstChild("Torso") or m:FindFirstChild("RootPart") or c.head
     local hull = m:FindFirstChild("CollisionHull")
     if hull then
         local okS, st = pcall(function() return hull:GetAttribute("State") end)
@@ -450,8 +529,15 @@ end
 
 local function seedProfileContainers()
     local prof = gameProfile()
-    if prof and prof.path then
-        containers[prof.path] = true
+    if prof then
+        if prof.path then
+            containers[prof.path] = true
+        end
+        if prof.paths then
+            for i = 1, #prof.paths do
+                containers[prof.paths[i]] = true
+            end
+        end
     end
 end
 
@@ -551,6 +637,7 @@ local function mainLoop()
 end
 
 
+seedProfileContainers()
 task.spawn(mainLoop)
 
 
