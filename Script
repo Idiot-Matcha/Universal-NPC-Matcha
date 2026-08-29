@@ -69,8 +69,9 @@ local PROFILES = {
         partRigs = true,
     },
     [3286745597] = {
-        folder = "ZombieTargets",
-        paths = { "game.Workspace" },
+        folder = "Zombies",
+        paths = { "game.Workspace.Enemies.Zombies" },
+        partRigs = true,
     },
 }
 
@@ -142,7 +143,7 @@ local function rigShape(model)
             if b.ClassName == "Model" and b:FindFirstChildOfClass("Humanoid") then return true end
         end
     end
-    if model.ClassName ~= "Model" then return false end
+    if model.ClassName ~= "Model" and model.ClassName ~= "Actor" then return false end
     if prof then
         if model:FindFirstChild("HumanoidRootPart") then
             if model:FindFirstChild("CollisionHull") then return true end
@@ -347,7 +348,7 @@ local function walkScan(inst, depth, pp, out, seenAddr, budget)
         if budget.n <= 0 then return end
         addRig(c, pp, out, seenAddr)
         if not LEAF_CLASSES[c.ClassName] then
-            if c.ClassName == "Model" then
+            if c.ClassName == "Model" or c.ClassName == "Actor" then
                 local hum = c:FindFirstChildOfClass("Humanoid")
                 if hum and (c:FindFirstChild("Head") or c:FindFirstChild("Torso")) then
                     local p = c.Parent
@@ -440,7 +441,7 @@ local function seedStep(budget)
             stack[#stack] = nil
         else
             spent = spent + 1
-            if c.ClassName == "Model" then
+            if c.ClassName == "Model" or c.ClassName == "Actor" then
                 local hum = c:FindFirstChildOfClass("Humanoid")
                 if hum then
                     local head = c:FindFirstChild("Head") or c:FindFirstChild("Torso")
