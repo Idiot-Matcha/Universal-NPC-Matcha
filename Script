@@ -72,6 +72,7 @@ local PROFILES = {
         folder = "Zombies",
         paths = { "game.Workspace.Enemies.Zombies" },
         partRigs = true,
+        skipPartRigs = true,
     },
 }
 
@@ -137,7 +138,7 @@ end
 local function rigShape(model)
     if model.Parent == nil then return false end
     local prof = gameProfile()
-    if prof and prof.partRigs and (model.ClassName == "Part" or model.ClassName == "MeshPart") then return true end
+    if prof and prof.partRigs and not prof.skipPartRigs and (model.ClassName == "Part" or model.ClassName == "MeshPart") then return true end
     if prof and prof.bodyChild then
         for _, b in ipairs(model:GetChildren()) do
             if b.ClassName == "Model" and b:FindFirstChildOfClass("Humanoid") then return true end
@@ -148,7 +149,7 @@ local function rigShape(model)
         if model:FindFirstChild("HumanoidRootPart") then
             if model:FindFirstChild("CollisionHull") then return true end
             if model:FindFirstChildOfClass("Humanoid") and (model:FindFirstChild("Head") or model:FindFirstChild("Torso")) then return true end
-            if prof.partRigs then return true end
+            if prof.partRigs and not prof.skipPartRigs then return true end
             return false
         end
         if prof.partRigs then
@@ -190,7 +191,7 @@ local function aliveRig(model)
                 return ok and h ~= nil and h >= 0
             end
         end
-        if prof and prof.partRigs then
+        if prof and prof.partRigs and not prof.skipPartRigs then
             if model.ClassName == "Part" or model.ClassName == "MeshPart" then return true end
             if model:FindFirstChild("HumanoidRootPart") or model:FindFirstChild("RootPart")
                 or model:FindFirstChildOfClass("Part") or model:FindFirstChildOfClass("MeshPart") then return true end
@@ -222,7 +223,7 @@ local function drawable(model)
                 return false
             end
         end
-        if prof and prof.partRigs then
+        if prof and prof.partRigs and not prof.skipPartRigs then
             if model.ClassName == "Part" or model.ClassName == "MeshPart" then return true end
             if model:FindFirstChild("HumanoidRootPart") or model:FindFirstChild("RootPart")
                 or model:FindFirstChildOfClass("Part") or model:FindFirstChildOfClass("MeshPart") then return true end
