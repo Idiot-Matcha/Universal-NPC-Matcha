@@ -68,6 +68,10 @@ local PROFILES = {
         paths = { "game.Workspace._NPCS_" },
         partRigs = true,
     },
+    [3286745597] = {
+        folder = "ZombieTargets",
+        paths = { "game.Workspace" },
+    },
 }
 
 local function gameProfile()
