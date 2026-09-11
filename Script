@@ -238,8 +238,17 @@ local function aliveRig(model)
 end
 
 
+local function partAlive(p)
+    if not p then return false end
+    local ok, par = pcall(function() return p.Parent end)
+    return ok and par ~= nil
+end
+
+
 local function drawable(model)
-    if model.Parent == nil then return false end
+    local okp, par = pcall(function() return model.Parent end)
+    if not okp then return nil end
+    if par == nil then return false end
     local x = model:FindFirstChildOfClass("Humanoid")
     if not x then
         local prof = gameProfile()
@@ -247,12 +256,13 @@ local function drawable(model)
             local b, hx = bodyHumanoid(model)
             if b then
                 local ok, hp = pcall(function() return hx.Health end)
-                if not ok or hp == nil then return false end
+                if not ok or hp == nil then return nil end
                 if hp > 0 then return true end
                 local r = b:FindFirstChild("HumanoidRootPart") or b:FindFirstChild("UpperTorso") or b:FindFirstChild("Torso")
                 if r then
                     local okv, v = pcall(function() return r.AssemblyLinearVelocity end)
-                    if okv and v and v.Magnitude > 1 then return true end
+                    if not okv or v == nil then return nil end
+                    if v.Magnitude > 1 then return true end
                 end
                 return false
             end
@@ -264,18 +274,20 @@ local function drawable(model)
         end
         if model:FindFirstChild("HumanoidRootPart") and model:FindFirstChild("CollisionHull") then
             local okha, ha = pcall(function() return model:GetAttribute("Health") end)
-            if okha and type(ha) == "number" then return ha > 0 end
+            if not okha then return nil end
+            if type(ha) == "number" then return ha > 0 end
             return true
         end
         return false
     end
     local ok, hp = pcall(function() return x.Health end)
-    if not ok or hp == nil then return false end
+    if not ok or hp == nil then return nil end
     if hp > 0 then return true end
     local r = model:FindFirstChild("HumanoidRootPart") or model:FindFirstChild("Torso")
     if r then
         local okv, v = pcall(function() return r.AssemblyLinearVelocity end)
-        if okv and v and v.Magnitude > 1 then return true end
+        if not okv or v == nil then return nil end
+        if v.Magnitude > 1 then return true end
     end
     return false
 end
@@ -557,7 +569,7 @@ end
 
 
 local function newCache()
-    return { head = nil, root = nil, hp = 0, mhp = 100, draw = false, name = "NPC" }
+    return { head = nil, root = nil, hp = 0, mhp = 100, draw = true, name = "NPC" }
 end
 
 
@@ -604,7 +616,12 @@ local function refreshCache(c, m)
         local okma, ma = pcall(function() return m:GetAttribute("MaxHealth") end)
         if okma and type(ma) == "number" and ma > 0 then c.mhp = ma end
     end
-    c.root = c.root or m:FindFirstChild("HumanoidRootPart") or m:FindFirstChild("Torso") or m:FindFirstChild("RootPart") or c.head
+    if c.head == nil or not partAlive(c.head) then
+        c.head = m:FindFirstChild("HumanoidRootPart") or m:FindFirstChild("RootPart") or m:FindFirstChild("Head") or m
+    end
+    if c.root == nil or not partAlive(c.root) then
+        c.root = m:FindFirstChild("HumanoidRootPart") or m:FindFirstChild("Torso") or m:FindFirstChild("RootPart") or c.head
+    end
     local hull = m:FindFirstChild("CollisionHull")
     if hull then
         local okS, st = pcall(function() return hull:GetAttribute("State") end)
@@ -612,7 +629,8 @@ local function refreshCache(c, m)
             c.name = c.name .. " [" .. st .. "]"
         end
     end
-    c.draw = drawable(m)
+    local nd = drawable(m)
+    if nd ~= nil then c.draw = nd end
 end
 
 
@@ -704,32 +722,43 @@ local function mainLoop()
                     print("DBG rig " .. m.Name .. " hp=" .. tostring(h) .. " alive=" .. tostring(okH and h ~= nil and h > 0) .. " addr=" .. tostring(addr) .. " reg=" .. tostring(addr and registered[addr] ~= nil))
                 end
             end
-            local alive = {}
+            local seen = {}
             for _, m in ipairs(list) do
                 local addr = m.Address
-                if addr and aliveRig(m) then
-                    alive[addr] = true
+                if addr then
+                    seen[addr] = true
                     local rec = registered[addr]
                     if rec then
                         rec.misses = 0
                         refreshCache(rec.cache, m)
-                    else
+                    elseif aliveRig(m) then
                         local c = newCache()
                         refreshCache(c, m)
-                        local ok2, h = pcall(RegisterModel, makeCallbacks(m, c))
-                        if ok2 and h then registered[addr] = { model = m, handle = h, misses = 0, cache = c } end
+                        if c.draw ~= false then
+                            local ok2, h = pcall(RegisterModel, makeCallbacks(m, c))
+                            if ok2 and h then registered[addr] = { model = m, handle = h, misses = 0, cache = c } end
+                        end
                     end
                 end
             end
+            -- every registered rig keeps updating even when the scan does not
+            -- reach it; a handle is dropped only once the model is truly gone
             for addr, rec in pairs(registered) do
-                if not alive[addr] or not drawable(rec.model) then
-                    rec.misses = (rec.misses or 0) + 1
-                    if rec.misses > 3 then
-                        pcall(rec.handle.Remove, rec.handle)
-                        registered[addr] = nil
+                if not seen[addr] then
+                    local okp, par = pcall(function() return rec.model.Parent end)
+                    if not okp then
+                        rec.misses = 0
+                    elseif par ~= nil then
+                        refreshCache(rec.cache, rec.model)
+                        rec.misses = 0
+                    else
+                        rec.misses = (rec.misses or 0) + 1
+                        rec.cache.draw = false
+                        if rec.misses > 4 then
+                            pcall(rec.handle.Remove, rec.handle)
+                            registered[addr] = nil
+                        end
                     end
-                else
-                    rec.misses = 0
                 end
             end
             local n = 0
