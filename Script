@@ -73,6 +73,7 @@ local PROFILES = {
     [96430285140968] = {
         folder = "NPCs",
         bodiesFolder = "ClientNPCs",
+        meshRigs = true,
     },
     [82797688803922] = {
         folder = "NPCs",
@@ -179,6 +180,12 @@ local function rigShape(model)
         end
     end
     if model.ClassName ~= "Model" and model.ClassName ~= "Actor" then return false end
+    if prof and prof.meshRigs then
+        -- collision rigs (HumanoidRootPart + CollisionHull, no Head) draw a
+        -- degenerate box and flicker; only accept the visual mesh rigs
+        if model:FindFirstChild("Head") and model:FindFirstChild("HumanoidRootPart") then return true end
+        return false
+    end
     if prof then
         if model:FindFirstChild("HumanoidRootPart") then
             if model:FindFirstChild("CollisionHull") then return true end
@@ -213,11 +220,33 @@ local function bodyHumanoid(model)
 end
 
 
+local function meshSourceRig(model)
+    local src = model:FindFirstChild("SourceBlock")
+    if not src then return nil end
+    local okV, v = pcall(function() return src.Value end)
+    if not okV or v == nil then return nil end
+    local okP, rig = pcall(function() return v.Parent end)
+    if not okP then return nil end
+    return rig
+end
+
+
 local function aliveRig(model)
     if model.Parent == nil then return false end
     local x = model:FindFirstChildOfClass("Humanoid")
     if not x then
         local prof = gameProfile()
+        if prof and prof.meshRigs then
+            if model:FindFirstChild("Head") and model:FindFirstChild("HumanoidRootPart") then
+                local rig = meshSourceRig(model)
+                if rig then
+                    local okH, ha = pcall(function() return rig:GetAttribute("Health") end)
+                    if okH and type(ha) == "number" then return ha >= 0 end
+                end
+                return true
+            end
+            return false
+        end
         if prof and prof.bodyChild then
             local b, hx = bodyHumanoid(model)
             if b then
@@ -252,6 +281,18 @@ local function drawable(model)
     local x = model:FindFirstChildOfClass("Humanoid")
     if not x then
         local prof = gameProfile()
+        if prof and prof.meshRigs then
+            if not (model:FindFirstChild("Head") and model:FindFirstChild("HumanoidRootPart")) then
+                return false
+            end
+            local rig = meshSourceRig(model)
+            if rig then
+                local okH, ha = pcall(function() return rig:GetAttribute("Health") end)
+                if not okH then return nil end
+                if type(ha) == "number" then return ha > 0 end
+            end
+            return true
+        end
         if prof and prof.bodyChild then
             local b, hx = bodyHumanoid(model)
             if b then
@@ -574,6 +615,33 @@ end
 
 
 local function refreshCache(c, m)
+    local prof = gameProfile()
+    if prof and prof.meshRigs then
+        local head = m:FindFirstChild("Head")
+        local root = m:FindFirstChild("HumanoidRootPart")
+        c.head = head or (partAlive(c.head) and c.head) or root or m
+        c.root = root or (partAlive(c.root) and c.root) or c.head
+        c.name = m.Name
+        local rig = meshSourceRig(m)
+        if rig then
+            local okN, rn = pcall(function() return rig.Name end)
+            if okN and type(rn) == "string" and #rn > 0 then c.name = rn end
+            local okH, ha = pcall(function() return rig:GetAttribute("Health") end)
+            if okH and type(ha) == "number" and ha >= 0 then c.hp = ha end
+            local okM, ma = pcall(function() return rig:GetAttribute("MaxHealth") end)
+            if okM and type(ma) == "number" and ma > 0 then c.mhp = ma end
+            local hull = rig:FindFirstChild("CollisionHull")
+            if hull then
+                local okS, st = pcall(function() return hull:GetAttribute("State") end)
+                if okS and st and st ~= "" and st ~= "Patrolling" then
+                    c.name = c.name .. " [" .. st .. "]"
+                end
+            end
+        end
+        local nd = drawable(m)
+        if nd ~= nil then c.draw = nd end
+        return
+    end
     c.name = m.Name
     local x = m:FindFirstChildOfClass("Humanoid")
     if x then
