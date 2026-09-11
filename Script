@@ -6,33 +6,58 @@ local function refreshW()
     return Workspace
 end
 
-if type(_G.npcEspLoop) == "number" and tick() - _G.npcEspLoop < 10 then
-    if type(_G.npcEspState) == "table" then
-        _G.npcEspState.running = false
-    end
-    if type(_G.npcEspHandles) == "table" then
-        for _, rec in pairs(_G.npcEspHandles) do
-            if type(rec) == "table" and rec.handle then
-                pcall(rec.handle.Remove, rec.handle)
-            end
-        end
-        _G.npcEspHandles = {}
-    end
-    _G.npcEspLoop = nil
-    if notify then
-        notify("NPC ESP", "Disabled - rerun to enable", 3)
-    end
-    print("NPC ESP disabled")
-    return
+local function workspaceFull()
+    local ok, f = pcall(function() return Workspace:GetFullName() end)
+    if ok and type(f) == "string" and #f > 0 then return f end
+    return "game.Workspace"
 end
-if type(_G.npcEspHandles) == "table" then
+local WS_FULL = workspaceFull()
+
+-- Matcha instance wrappers are not reliably comparable (the same instance can
+-- come back as two wrappers that fail ==), so every loop/watchdog carries a
+-- plain-number generation and the handle registry is one shared table.
+local function removeAllHandles()
+    if type(_G.npcEspHandles) ~= "table" then
+        _G.npcEspHandles = {}
+        return
+    end
     for _, rec in pairs(_G.npcEspHandles) do
         if type(rec) == "table" and rec.handle then
             pcall(rec.handle.Remove, rec.handle)
         end
     end
+    for k in pairs(_G.npcEspHandles) do _G.npcEspHandles[k] = nil end
 end
-_G.npcEspHandles = {}
+
+local function bumpGen()
+    _G.npcEspGen = (tonumber(_G.npcEspGen) or 0) + 1
+    return _G.npcEspGen
+end
+
+if type(_G.npcEspLoop) == "number" and tick() - _G.npcEspLoop < 10
+    and not _G.npcEspDisabled then
+    local myGen = bumpGen()
+    _G.npcEspDisabled = true
+    if type(_G.npcEspState) == "table" then
+        _G.npcEspState.running = false
+    end
+    removeAllHandles()
+    _G.npcEspLoop = nil
+    if notify then
+        notify("NPC ESP", "Disabled - rerun to enable", 3)
+    end
+    print("NPC ESP disabled")
+    -- catch straggler registrations from a loop that was mid-scan
+    task.spawn(function()
+        task.wait(3)
+        if _G.npcEspGen == myGen then removeAllHandles() end
+    end)
+    return
+end
+
+_G.npcEspDisabled = false
+local GEN = bumpGen()
+removeAllHandles()
 
 if notify then
     notify("NPC ESP", "Loaded", 3)
@@ -80,13 +105,22 @@ local function gameProfile()
     return PROFILES[PLACE]
 end
 
-local registered = {}   -- addr -> {model=, handle=}
-local containers = {}   -- container full paths that have held rigs
+local registered = _G.npcEspHandles   -- shared across runs so cleanup catches strays
+local containers = {}   -- discovered container paths that have held rigs
+local containerMiss = {}-- path -> consecutive failed resolves
+local pinned = {}       -- profile/keyword container paths (never wiped)
+local pinnedList = {}   -- pinned paths in deterministic scan order
 local shapeMemo = {}    -- addr -> true (confirmed rig)
 local lastCount = -1
-local state = { running = true }
+local state = { running = true, loopToken = 0 }
 _G.npcEspState = state
-_G.npcEspHandles = registered
+
+local function pinContainer(path)
+    if type(path) == "string" and #path > 0 and not pinned[path] then
+        pinned[path] = true
+        pinnedList[#pinnedList + 1] = path
+    end
+end
 
 
 local KEYWORDS = {
@@ -228,7 +262,11 @@ local function drawable(model)
             if model:FindFirstChild("HumanoidRootPart") or model:FindFirstChild("RootPart")
                 or model:FindFirstChildOfClass("Part") or model:FindFirstChildOfClass("MeshPart") then return true end
         end
-        if model:FindFirstChild("HumanoidRootPart") and model:FindFirstChild("CollisionHull") then return true end
+        if model:FindFirstChild("HumanoidRootPart") and model:FindFirstChild("CollisionHull") then
+            local okha, ha = pcall(function() return model:GetAttribute("Health") end)
+            if okha and type(ha) == "number" then return ha > 0 end
+            return true
+        end
         return false
     end
     local ok, hp = pcall(function() return x.Health end)
@@ -315,7 +353,14 @@ local function addRig(model, pp, out, seenAddr)
                     end
                 end
             else
-                inF = (p.Name == prof.folder or p.Name == prof.bodiesFolder) and p.Parent == Workspace
+                -- full-name strings: Matcha wrappers fail == nondeterministically
+                local okP, pf = pcall(function() return p:GetFullName() end)
+                inF = okP and (
+                    pf == WS_FULL .. "." .. prof.folder
+                    or pf == "Workspace." .. prof.folder
+                    or (prof.bodiesFolder ~= nil and (
+                        pf == WS_FULL .. "." .. prof.bodiesFolder
+                        or pf == "Workspace." .. prof.bodiesFolder)))
             end
         end
         local okA, cb = pcall(function() return model:GetAttribute("ClientBody") end)
@@ -344,6 +389,7 @@ local FAST_BUDGET = 5000
 
 local function walkScan(inst, depth, pp, out, seenAddr, budget)
     if depth > 6 or budget.n <= 0 then return end
+    local instFull = fullName(inst)
     for _, c in ipairs(inst:GetChildren()) do
         budget.n = budget.n - 1
         if budget.n <= 0 then return end
@@ -351,9 +397,13 @@ local function walkScan(inst, depth, pp, out, seenAddr, budget)
         if not LEAF_CLASSES[c.ClassName] then
             if c.ClassName == "Model" or c.ClassName == "Actor" then
                 local hum = c:FindFirstChildOfClass("Humanoid")
-                if hum and (c:FindFirstChild("Head") or c:FindFirstChild("Torso")) then
+                if hum and (c:FindFirstChild("Head") or c:FindFirstChild("Torso"))
+                    and not pp[fullName(c)] then
                     local p = c.Parent
-                    if p and p ~= inst then containers[fullName(p)] = true end
+                    if p then
+                        local pf = fullName(p)
+                        if pf ~= "" and pf ~= instFull then containers[pf] = true end
+                    end
                 end
             end
             walkScan(c, depth + 1, pp, out, seenAddr, budget)
@@ -362,8 +412,25 @@ local function walkScan(inst, depth, pp, out, seenAddr, budget)
 end
 
 
+local CONTAINER_CAP = 200
+
 local function scanFast(pp)
     local out, seenAddr = {}, {}
+
+    -- 1) pinned containers first: profile folders and keyword-matched folders
+    -- get a guaranteed slice no matter how much junk has accumulated elsewhere
+    local pbTotal = { n = 24000 }
+    for i = 1, #pinnedList do
+        if pbTotal.n <= 0 then break end
+        local c = resolve(pinnedList[i])
+        if c and c.Parent ~= nil then
+            local pb = { n = math.min(4000, pbTotal.n) }
+            local before = pb.n
+            walkScan(c, 1, pp, out, seenAddr, pb)
+            pbTotal.n = pbTotal.n - (before - pb.n)
+        end
+    end
+
     local top = Workspace:GetChildren()
     for _, child in ipairs(top) do
         addRig(child, pp, out, seenAddr)
@@ -374,6 +441,7 @@ local function scanFast(pp)
             end
         end
     end
+
     local ig = Workspace:FindFirstChild("Ignore")
     if ig then
         containers[fullName(ig)] = true
@@ -383,15 +451,42 @@ local function scanFast(pp)
         local ib = { n = FAST_BUDGET }
         walkScan(ig, 1, pp, out, seenAddr, ib)
     end
-    local cbTotal = { n = 45000 }
+
+    -- 2) discovered containers share one budget; dead paths get pruned
+    local cbTotal = { n = 40000 }
+    local dead = nil
     for path in pairs(containers) do
-        local c = resolve(path)
-        if c and c.Parent ~= nil then
-            local cb = { n = math.min(3000, cbTotal.n) }
-            walkScan(c, 1, pp, out, seenAddr, cb)
-            cbTotal.n = cbTotal.n - (3000 - cb.n)
+        if cbTotal.n > 0 then
+            local c = resolve(path)
+            if c and c.Parent ~= nil then
+                containerMiss[path] = nil
+                local cb = { n = math.min(4000, cbTotal.n) }
+                local before = cb.n
+                walkScan(c, 1, pp, out, seenAddr, cb)
+                cbTotal.n = cbTotal.n - (before - cb.n)
+            else
+                dead = dead or {}
+                dead[#dead + 1] = path
+            end
         end
     end
+    if dead then
+        for i = 1, #dead do
+            local path = dead[i]
+            local miss = (containerMiss[path] or 0) + 1
+            if miss > 30 then
+                containers[path] = nil
+                containerMiss[path] = nil
+            else
+                containerMiss[path] = miss
+            end
+        end
+    end
+    local cCount = 0
+    for _ in pairs(containers) do cCount = cCount + 1 end
+    if cCount > CONTAINER_CAP then containers = {} end
+
+    -- 3) last-resort shallow sweep of the whole workspace
     local wb = { n = FAST_BUDGET }
     for _, g in ipairs(top) do
         if not LEAF_CLASSES[g.ClassName] then
@@ -408,7 +503,7 @@ local function seedByKeywords(pre)
         if depth > pre then return end
         for _, c in ipairs(inst:GetChildren()) do
             if nameHits(c.Name) then
-                containers[fullName(c)] = true
+                pinContainer(fullName(c))
             end
             if not LEAF_CLASSES[c.ClassName] then
                 walk(c, depth + 1)
@@ -421,7 +516,7 @@ end
 
 local seedState = {}
 
-local function seedStep(budget)
+local function seedStep(budget, pp)
     if not seedState.stack then
         local ws = refreshW()
         if not ws then return end
@@ -446,7 +541,7 @@ local function seedStep(budget)
                 local hum = c:FindFirstChildOfClass("Humanoid")
                 if hum then
                     local head = c:FindFirstChild("Head") or c:FindFirstChild("Torso")
-                    if head then
+                    if head and not pp[fullName(c)] then
                         local p = c.Parent
                         if p then containers[fullName(p)] = true end
                     end
@@ -504,6 +599,10 @@ local function refreshCache(c, m)
             local okh, h = pcall(function() return hv.Value end)
             if okh and type(h) == "number" and h >= 0 then c.hp = h end
         end
+        local okha, ha = pcall(function() return m:GetAttribute("Health") end)
+        if okha and type(ha) == "number" and ha >= 0 then c.hp = ha end
+        local okma, ma = pcall(function() return m:GetAttribute("MaxHealth") end)
+        if okma and type(ma) == "number" and ma > 0 then c.mhp = ma end
     end
     c.root = c.root or m:FindFirstChild("HumanoidRootPart") or m:FindFirstChild("Torso") or m:FindFirstChild("RootPart") or c.head
     local hull = m:FindFirstChild("CollisionHull")
@@ -542,12 +641,18 @@ local function seedProfileContainers()
     local prof = gameProfile()
     if prof then
         if prof.path then
-            containers[prof.path] = true
+            pinContainer(prof.path)
         end
         if prof.paths then
             for i = 1, #prof.paths do
-                containers[prof.paths[i]] = true
+                pinContainer(prof.paths[i])
             end
+        end
+        if prof.folder then
+            pinContainer(WS_FULL .. "." .. prof.folder)
+        end
+        if prof.bodiesFolder then
+            pinContainer(WS_FULL .. "." .. prof.bodiesFolder)
         end
     end
 end
@@ -562,35 +667,33 @@ local function cleanupHandles()
     for _, rec in pairs(registered) do
         pcall(rec.handle.Remove, rec.handle)
     end
-    registered = {}
-    _G.npcEspHandles = registered
+    for k in pairs(registered) do registered[k] = nil end
 end
 
 
-local epoch = 0
-
 local function mainLoop()
-    epoch = epoch + 1
-    local me = epoch
+    local me = (state.loopToken or 0) + 1
+    state.loopToken = me
     local tickN = 0
-    while state.running do
-        if me ~= epoch then return end
+    while state.running and _G.npcEspGen == GEN and state.loopToken == me do
         heartbeat()
         local ok, err = pcall(function()
             if not refreshW() then return end
             tickN = tickN + 1
-            seedStep(3000)
+            local pp = playerPaths()
+            seedStep(3000, pp)
             if tickN % 1200 == 0 then
                 shapeMemo = {}
                 containers = {}
+                containerMiss = {}
                 seedByKeywords(3)
                 seedProfileContainers()
             end
-            local pp = playerPaths()
             local list = scanFast(pp)
             if _G.npcDebug then
                 local cCount = 0
                 for _ in pairs(containers) do cCount = cCount + 1 end
+                for _ in pairs(pinned) do cCount = cCount + 1 end
                 local ig = Workspace:FindFirstChild("Ignore")
                 local zn = ig and ig:FindFirstChild("Zombies")
                 print("DBG topkids=" .. #(Workspace:GetChildren()) .. " cont=" .. cCount .. " list=" .. #list .. " ig=" .. tostring(ig ~= nil) .. " zn=" .. tostring(zn and #zn:GetChildren() or -1))
@@ -640,31 +743,31 @@ local function mainLoop()
         heartbeat()
         task.wait(1)
     end
-    if me == epoch then
+    if state.loopToken == me and _G.npcEspGen == GEN then
         cleanupHandles()
+        _G.npcEspLoop = nil
     end
-    _G.npcEspLoop = nil
     print("NPC ESP stopped")
 end
 
 
 seedProfileContainers()
+seedByKeywords(3)
 task.spawn(mainLoop)
 
 
 local function watchdog()
-    while state.running do
+    while state.running and _G.npcEspGen == GEN do
         task.wait(5)
+        if _G.npcEspGen ~= GEN then break end
         local last = _G.npcEspLoop
-        if type(last) ~= "number" or tick() - last > 12 then
+        if type(last) ~= "number" or tick() - last > 30 then
             print("NPC ESP health check: loop stale - restarting")
-seedProfileContainers()
-
-task.spawn(mainLoop)
-            task.wait(15)
+            seedProfileContainers()
+            task.spawn(mainLoop)
+            task.wait(30)
         end
     end
 end
 
-task.spawn(watchdog)
 task.spawn(watchdog)
